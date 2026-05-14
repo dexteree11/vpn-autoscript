@@ -55,7 +55,7 @@ DROPBEAR_RECEIVE_WINDOW=65536
 EOF
 echo "<font color='green'><b>IMAGITECH ENTERPRISE</b></font>" > /etc/issue.net
 systemctl restart dropbear
-
+if ! grep -q "/bin/false" /etc/shells; then echo "/bin/false" >> /etc/shells; fi
 IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
 cat <<EOF > /etc/danted.conf
 logoutput: syslog
