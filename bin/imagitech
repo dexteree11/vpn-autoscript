@@ -1,0 +1,196 @@
+#!/bin/bash
+# ==========================================================
+# IMAGITECH CORE - Global Command Interface (CLI)
+# ==========================================================
+
+# Source the logger
+source /opt/imagitech/lib/logger.sh
+
+DB_PATH="/opt/imagitech/core/imagitech.db"
+COMMAND=$1
+ACTION=$2
+
+# --- Core Functions ---
+
+action_user_add() {
+    local USERNAME=$1
+    local PASSWORD=$2
+    local DAYS=$3
+    local MAX_LOGINS=${4:-1} # Defaults to 1 if not provided
+
+    if [[ -z "$USERNAME" || -z "$PASSWORD" || -z "$DAYS" ]]; then
+        echo "Usage: imagitech user add <username> <password> <days> [max_logins]"
+        exit 1
+    fi
+
+    local EXP_DATE=$(date -d "+${DAYS} days" +"%Y-%m-%d %H:%M:%S")
+    local EXP_SYS=$(date -d "+${DAYS} days" +"%Y-%m-%d")
+
+    # 1. Provision Linux PAM
+    useradd -e "$EXP_SYS" -s /bin/false -M "$USERNAME" >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        log_sys "ERROR: Failed to create PAM user $USERNAME."
+        echo "Error: OS User creation failed."
+        exit 1
+    fi
+    echo "$USERNAME:$PASSWORD" | chpasswd
+
+    # 2. Update Single Source of Truth (SQLite)
+    sqlite3 "$DB_PATH" "INSERT INTO users (username, password, expiry_date, max_logins) VALUES ('$USERNAME', '$PASSWORD', '$EXP_DATE', $MAX_LOGINS);"
+    
+    # 3. Log the Event
+    log_auth "SUCCESS: User '$USERNAME' created. Expiry: $EXP_DATE. Limit: $MAX_LOGINS logins."
+    echo "User $USERNAME successfully provisioned."
+}
+
+action_user_del() {
+    local USERNAME=$1
+    if [[ -z "$USERNAME" ]]; then
+        echo "Usage: imagitech user del <username>"
+        exit 1
+    fi
+
+    # Kill active sessions and delete PAM user
+    pkill -u "$USERNAME" >/dev/null 2>&1
+    userdel -f "$USERNAME" >/dev/null 2>&1
+    
+    # Cascade delete in SQLite
+    sqlite3 "$DB_PATH" "DELETE FROM users WHERE username='$USERNAME';"
+    
+    log_auth "SUCCESS: User '$USERNAME' permanently deleted."
+    echo "User $USERNAME deleted."
+}
+
+action_service_restart() {
+    local SVC=$1
+    systemctl restart "$SVC" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        log_sys "SUCCESS: Service '$SVC' restarted gracefully."
+        echo "Service $SVC restarted."
+    else
+        log_sys "ERROR: Service '$SVC' failed to restart."
+        echo "Error restarting $SVC."
+    fi
+}
+
+action_service_failed() {
+    # Filters systemctl output for failed services only
+    FAILED=$(systemctl --failed --type=service --no-legend)
+    if [[ -z "$FAILED" ]]; then
+        echo -e "  ${GREEN}All services are running perfectly.${NC}"
+    else
+        echo -e "  ${RED}The following services have failed:${NC}"
+        echo "$FAILED" | awk '{print "  - " $1}'
+    fi
+}
+
+action_service_ports() {
+    # Uses ss to show listening ports for our specific protocols
+    echo -e "  ${ORANGE}%-10s %-10s %-15s${NC}" "PROTO" "PORT" "SERVICE"
+    echo "  ------------------------------------"
+    ss -tunlp | grep -E 'ssh|dropbear|python|stunnel|dnstt|dante' | \
+    awk '{
+        split($5, a, ":"); 
+        port=a[length(a)];
+        proto=toupper($1);
+        svc=$7;
+        sub(/.*"/, "", svc); sub(/".*/, "", svc);
+        printf "  %-10s %-10s %-15s\n", proto, port, svc
+    }' | sort -k2 -n | uniq
+}
+
+# --- Router Logic ---
+
+action_domain_update() {
+    local TYPE=$1
+    local NEW_DOMAIN=$2
+    
+    if [[ "$TYPE" == "host" ]]; then
+        echo "$NEW_DOMAIN" > /opt/imagitech/core/domain.txt
+        log_sys "SUCCESS: Primary Domain updated to $NEW_DOMAIN"
+        echo "Primary host updated successfully. (Remember to renew SSL if needed)."
+    elif [[ "$TYPE" == "ns" ]]; then
+        echo "$NEW_DOMAIN" > /opt/imagitech/core/ns_domain.txt
+        # Update the DNSTT systemd service to use the new NS
+        sed -i "s/-udp :5300 .* 127.0.0.1:109/-udp :5300 -privkey-file \/opt\/imagitech\/core\/keys\/dnstt.key $NEW_DOMAIN 127.0.0.1:109/g" /etc/systemd/system/dnstt.service
+        systemctl daemon-reload
+        systemctl restart dnstt
+        log_sys "SUCCESS: Nameserver Domain updated to $NEW_DOMAIN and DNSTT restarted."
+        echo "Nameserver updated and SlowDNS restarted."
+    fi
+}
+
+action_cert_renew() {
+    local DOMAIN=$(cat /opt/imagitech/core/domain.txt 2>/dev/null)
+    if [[ -z "$DOMAIN" ]]; then
+        echo "Error: Primary domain is not set."
+        exit 1
+    fi
+
+    echo "Stopping ports 80/443 to free up standalone verification..."
+    systemctl stop stunnel4 ws-proxy 2>/dev/null
+
+    /root/.acme.sh/acme.sh --renew -d "$DOMAIN" --standalone --force > /dev/null 2>&1
+    /root/.acme.sh/acme.sh --installcert -d "$DOMAIN" --ecc \
+        --fullchain-file /opt/imagitech/core/keys/fullchain.cer \
+        --key-file /opt/imagitech/core/keys/private.key > /dev/null 2>&1
+    
+    # Combine for Stunnel
+    cat /opt/imagitech/core/keys/fullchain.cer /opt/imagitech/core/keys/private.key > /opt/imagitech/core/keys/stunnel.pem
+
+    systemctl start stunnel4 ws-proxy
+    log_sys "SUCCESS: SSL Certificate successfully renewed for $DOMAIN"
+    echo "Certificate renewed and injected. Services restarted."
+}
+
+action_dnstt_keygen() {
+    mkdir -p /opt/imagitech/core/keys
+    cd /opt/imagitech/core/keys
+    
+    # Only run if forced or if key doesn't exist (prevents accidental client disconnections)
+    if [[ "$1" == "--force" ]] || [[ ! -f "dnstt.key" ]]; then
+        /opt/imagitech/bin/dnstt-server -gen-key -privkey-file dnstt.key -pubkey-file dnstt.pub
+        log_sys "WARNING: New DNSTT cryptographic keys generated."
+        systemctl restart dnstt
+        echo "New keys generated. Current PubKey: $(cat dnstt.pub)"
+    else
+        echo "Keys already exist. Use --force to overwrite."
+    fi
+}
+
+case "$COMMAND" in
+    user)
+        # ... (previous user actions) ...
+        ;;
+    service)
+        case "$ACTION" in
+            restart) action_service_restart "$3" ;;
+            failed)  action_service_failed ;;
+            ports)   action_service_ports ;;
+            *) echo "Invalid service action. Use: restart, failed, ports" ;;
+        esac
+        ;;
+    domain)
+        case "$ACTION" in
+            host) action_domain_update "host" "$3" ;;
+            ns) action_domain_update "ns" "$3" ;;
+            *) echo "Invalid domain action. Use: host, ns" ;;
+        esac
+        ;;
+    cert)
+        case "$ACTION" in
+            renew) action_cert_renew ;;
+            *) echo "Invalid cert action. Use: renew" ;;
+        esac
+        ;;
+    dnstt)
+        case "$ACTION" in
+            keygen) action_dnstt_keygen "$3" ;;
+        esac
+        ;;
+    *)
+        echo "IMAGITECH ENTERPRISE CLI"
+        echo "Usage: imagitech <command> <action> [args]"
+        echo "Commands: user, service, domain, cert, dnstt"
+        ;;
+esac

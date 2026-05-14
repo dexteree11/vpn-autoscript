@@ -1,0 +1,11 @@
+#!/bin/bash
+# Global alias for the Imagitech Panel
+
+# Ensure execution as root
+if [ "${EUID}" -ne 0 ]; then
+    echo "Please run as root (sudo su -)"
+    exit 1
+fi
+
+# Launch the Main HUB
+bash /opt/imagitech/menus/main.sh
