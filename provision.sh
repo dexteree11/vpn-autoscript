@@ -182,4 +182,13 @@ iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
 netfilter-persistent save > /dev/null 2>&1
 systemctl daemon-reload && systemctl enable --now dnstt
 
+# Save iptables routing across reboots
+DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent > /dev/null 2>&1
+iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+netfilter-persistent save > /dev/null 2>&1
+
+# Ensure ALL core services start on server reboot
+systemctl daemon-reload
+systemctl enable --now dnstt dropbear stunnel4 danted ws-proxy badvpn-7100
+
 echo -e "${GREEN}[+] Protocol Engine Provisioned Successfully!${NC}"
