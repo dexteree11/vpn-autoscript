@@ -66,6 +66,11 @@ for m in "${MENUS[@]}"; do
     curl -sS -o "/opt/imagitech/menus/$m" "$REPO_URL/menus/$m"
 done
 
+# Fetch and execute the Protocol Provisioning Engine
+curl -sS -o /opt/imagitech/core/provision.sh "$REPO_URL/provision.sh"
+chmod +x /opt/imagitech/core/provision.sh
+bash /opt/imagitech/core/provision.sh
+
 # --- 4. Daemonizing the Python Enforcer ---
 echo -e "${CYAN}[*] Phase 4: Initializing Stateful Security Daemon...${NC}"
 cat <<EOF > /etc/systemd/system/imagitech-monitor.service
