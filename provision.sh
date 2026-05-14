@@ -144,7 +144,9 @@ systemctl restart stunnel4
 echo -e "${CYAN}  -> Compiling BadVPN & DNSTT (This takes a moment)...${NC}"
 cd /tmp
 git clone https://github.com/ambrop72/badvpn.git > /dev/null 2>&1
-cd badvpn/build && cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 > /dev/null 2>&1 && make install > /dev/null 2>&1
+cd badvpn
+mkdir -p build && cd build
+cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 > /dev/null 2>&1 && make install > /dev/null 2>&1
 cat <<EOF > /etc/systemd/system/badvpn-7100.service
 [Unit]
 Description=BadVPN UDPGW
