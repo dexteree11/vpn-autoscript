@@ -209,7 +209,11 @@ action_dnstt_keygen() {
 
 case "$COMMAND" in
     user)
-        # ... (previous user actions) ...
+        case "$ACTION" in
+            add) action_user_add "$3" "$4" "$5" "$6" ;;
+            del) action_user_del "$3" ;;
+            *) echo "Invalid user action. Use: add, del" ;;
+        esac
         ;;
     service)
         case "$ACTION" in
