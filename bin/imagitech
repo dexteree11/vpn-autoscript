@@ -16,7 +16,7 @@ action_user_add() {
     local USERNAME=$1
     local PASSWORD=$2
     local DAYS=$3
-    local MAX_LOGINS=${4:-1} # Defaults to 1 if not provided
+    local MAX_LOGINS=${4:-1}
 
     if [[ -z "$USERNAME" || -z "$PASSWORD" || -z "$DAYS" ]]; then
         echo "Usage: imagitech user add <username> <password> <days> [max_logins]"
@@ -25,22 +25,71 @@ action_user_add() {
 
     local EXP_DATE=$(date -d "+${DAYS} days" +"%Y-%m-%d %H:%M:%S")
     local EXP_SYS=$(date -d "+${DAYS} days" +"%Y-%m-%d")
+    local FORMAT_EXP=$(date -d "+${DAYS} days" +"%B %d, %Y")
 
-    # 1. Provision Linux PAM
-    useradd -e "$EXP_SYS" -s /bin/false -M "$USERNAME" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        log_sys "ERROR: Failed to create PAM user $USERNAME."
-        echo "Error: OS User creation failed."
-        exit 1
+    # 1. Provision Linux PAM (Upsert logic: Update if exists, Create if new)
+    if id "$USERNAME" &>/dev/null; then
+        usermod -e "$EXP_SYS" -s /bin/false "$USERNAME" >/dev/null 2>&1
+        echo "$USERNAME:$PASSWORD" | chpasswd
+    else
+        useradd -e "$EXP_SYS" -s /bin/false -M "$USERNAME" >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            echo -e "\n\033[0;31mError: OS User creation failed. Check permissions.\033[0m"
+            exit 1
+        fi
+        echo "$USERNAME:$PASSWORD" | chpasswd
     fi
-    echo "$USERNAME:$PASSWORD" | chpasswd
 
-    # 2. Update Single Source of Truth (SQLite)
-    sqlite3 "$DB_PATH" "INSERT INTO users (username, password, expiry_date, max_logins) VALUES ('$USERNAME', '$PASSWORD', '$EXP_DATE', $MAX_LOGINS);"
+    # 2. Update SQLite (ON CONFLICT prevents crashing if user exists)
+    sqlite3 "$DB_PATH" "INSERT INTO users (username, password, expiry_date, max_logins, status) VALUES ('$USERNAME', '$PASSWORD', '$EXP_DATE', $MAX_LOGINS, 'ACTIVE') ON CONFLICT(username) DO UPDATE SET password='$PASSWORD', expiry_date='$EXP_DATE', max_logins=$MAX_LOGINS, status='ACTIVE';"
     
-    # 3. Log the Event
-    log_auth "SUCCESS: User '$USERNAME' created. Expiry: $EXP_DATE. Limit: $MAX_LOGINS logins."
-    echo "User $USERNAME successfully provisioned."
+    log_auth "SUCCESS: User '$USERNAME' provisioned. Expiry: $EXP_DATE. Limit: $MAX_LOGINS."
+
+    # 3. Fetch Variables for the Payload Matrix
+    local IP=$(curl -sS --max-time 3 ipv4.icanhazip.com || echo "UNKNOWN")
+    local HOST=$(cat /opt/imagitech/core/domain.txt 2>/dev/null || echo "Not Set")
+    local NS=$(cat /opt/imagitech/core/ns_domain.txt 2>/dev/null || echo "Not Set")
+    local PUBKEY=$(cat /opt/imagitech/core/keys/dnstt.pub 2>/dev/null || echo "Not Generated")
+
+    # 4. Generate the Enterprise Output
+    echo -e "\n\033[0;32mSSH Account provisioned successfully\033[0m"
+    echo -e "\033[0;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo -e "           \033[1mSSH WS ACCOUNT\033[0m          "
+    echo -e "\033[0;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo -e "Username      : ${USERNAME}"
+    echo -e "Password      : ${PASSWORD}"
+    echo -e "Max Login     : ${MAX_LOGINS} Connection(s)"
+    echo -e "Expired On    : ${FORMAT_EXP}"
+    echo -e "\033[0;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo -e "        \033[1mSERVER INFORMATION\033[0m         "
+    echo -e "\033[0;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo -e "IP            : ${IP}"
+    echo -e "Host          : ${HOST}"
+    echo -e "Nameserver    : ${NS}"
+    echo -e "PubKey        : ${PUBKEY}"
+    echo -e "OpenSSH       : 22"
+    echo -e "SSH-WS        : 80"
+    echo -e "Custom SSH    : 8880"
+    echo -e "SSH-SSL-WS    : 443"
+    echo -e "Dropbear      : 109, 143"
+    echo -e "SOCKS5        : 1080"
+    echo -e "\033[0;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo -e "SSH-80        : ${HOST}:80@${USERNAME}:${PASSWORD}"
+    echo -e "SSH-8880      : ${HOST}:8880@${USERNAME}:${PASSWORD}"
+    echo -e "SSH-443       : ${HOST}:443@${USERNAME}:${PASSWORD}"
+    echo -e "SOCKS5        : ${HOST}:1080:${USERNAME}:${PASSWORD}"
+    echo -e "\033[0;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo -e "\033[0;33m(Payload WSS)\033[0m"
+    echo -e "GET wss://bug.com [protocol][crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf][crlf]"
+    echo ""
+    echo -e "\033[0;33m(Payload WS - Port 80)\033[0m"
+    echo -e "GET / HTTP/1.1[crlf]Host: ${HOST}[crlf]Upgrade: websocket[crlf][crlf]"
+    echo ""
+    echo -e "\033[0;33m(Payload Custom Bypass - Port 8880)\033[0m"
+    echo -e "GET http://${HOST}:8880 HTTP/1.1[crlf]Host: [ISP_BUG_HOST][crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+    echo -e "\033[0;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo -e "   \033[0;31mNO SPAM | NO DDOS | NO TORRENT\033[0m  "
+    echo -e "\033[0;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 }
 
 action_user_del() {
